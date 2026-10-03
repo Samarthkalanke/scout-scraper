@@ -44,7 +44,7 @@ MIN_ATTEMPTS = 10  # flag zones with fewer attempts than this as small samples
 FLIP_SIDES = False
 
 CORNER_DX = 20     # feet from the middle of the court: farther out = near the sideline
-CORNER_MAX_Y = 14  # feet from the baseline: closer in = near the baseline
+CORNER_MAX_Y = 9  # feet from the baseline: closer in = near the baseline
 TOP_DX = 8         # feet from the middle of the court: closer in = straight down the middle
 
 
