@@ -1,0 +1,7 @@
+# Downloaded game data (scripts can always re-download it)
+data/raw/
+raw_*.json
+
+# Python cache
+__pycache__/
+*.pyc
