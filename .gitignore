@@ -1,5 +1,5 @@
 # Downloaded game data (scripts can always re-download it)
-data/raw/
+data/
 raw_*.json
 
 # Python cache
