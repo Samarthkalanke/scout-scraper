@@ -37,7 +37,7 @@ from pathlib import Path
 DATA_DIR = Path("data")
 DB_FILE = DATA_DIR / "scout.db"
 SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
-FULL_SEASON_GAMES = 20  # fewer games than this for a transfer = "partial"
+FULL_SEASON_GAMES = 20  # old team has fewer games than this in our data = "partial"
 
 
 def clean_name(name):
@@ -148,7 +148,10 @@ def main():
                 returning_minutes += own[0][3] or 0
             elif other:
                 status, src = "Transfer", other[0]
-                if (src[2] or 0) < FULL_SEASON_GAMES:
+                old_team_games = db.execute(
+                    "SELECT COUNT(*) FROM games WHERE season = ? AND (home_id = ? OR away_id = ?)",
+                    (last_season, src[0], src[0])).fetchone()[0]
+                if old_team_games < FULL_SEASON_GAMES:
                     note = (note + "; " if note else "") + "partial: old team not downloaded"
             else:
                 status, src = "No data", (None, "", 0, 0, 0)
