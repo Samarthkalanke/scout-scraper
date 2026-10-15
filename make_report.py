@@ -110,6 +110,8 @@ def team_season(db, team_id, season):
         "ppg": pts / n, "opp_ppg": opp / n,
         "fg": pct(g(us, "fieldGoalsMade"), g(us, "fieldGoalsAttempted")),
         "three": pct(g(us, "threePointFieldGoalsMade"), g(us, "threePointFieldGoalsAttempted")),
+        "two": pct(g(us, "fieldGoalsMade") - g(us, "threePointFieldGoalsMade"),
+                   g(us, "fieldGoalsAttempted") - g(us, "threePointFieldGoalsAttempted")),
         "ft": pct(g(us, "freeThrowsMade"), g(us, "freeThrowsAttempted")),
         "opp_fg": pct(g(them, "fieldGoalsMade"), g(them, "fieldGoalsAttempted")),
         "opp_three": pct(g(them, "threePointFieldGoalsMade"), g(them, "threePointFieldGoalsAttempted")),
@@ -133,6 +135,7 @@ def roster_profile(totals):
         "blk": per_game("BLK"),
         "fg": pct(totals.get("FGM", 0), fga),
         "three": pct(totals.get("3PTM", 0), totals.get("3PTA", 0)),
+        "two": pct(totals.get("FGM", 0) - totals.get("3PTM", 0), fga - totals.get("3PTA", 0)),
         "ft": pct(totals.get("FTM", 0), totals.get("FTA", 0)),
         "three_rate": pct(totals.get("3PTA", 0), fga),
         "ft_rate": pct(totals.get("FTA", 0), fga),
@@ -187,7 +190,7 @@ CSS = """
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ink:#eef0f4;--ink-soft:#a7adbd;--paper:#0e1116;--surface:#171b22;--line:#2a2f3a;--blue:#6f92ff;--blue-soft:#1b2647;--good:#4fd393;--good-soft:#113322;--warn:#f2a06a;--warn-soft:#3a2413;--muted-soft:#232833;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px -12px rgba(0,0,0,.5)}}
 *{box-sizing:border-box}
 body{background:var(--paper);color:var(--ink);font-family:"Source Sans 3",ui-sans-serif,system-ui,sans-serif;margin:0;padding:28px 16px 48px;display:flex;justify-content:center}
-main{width:100%;max-width:980px;display:flex;flex-direction:column;gap:28px}
+main{width:100%;max-width:1140px;display:flex;flex-direction:column;gap:28px}
 h1,h2,h3{font-family:"Oswald",ui-sans-serif,sans-serif;margin:0}
 header.page{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;border-bottom:3px solid var(--ink);padding-bottom:14px}
 .eyebrow{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--blue);font-weight:600;margin:0 0 4px}
@@ -204,7 +207,7 @@ section>h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;font-wei
 .pad{padding:16px 18px}
 .scroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
-th,td{padding:9px 11px;text-align:right;white-space:nowrap}
+th,td{padding:8px 8px;text-align:right;white-space:nowrap}
 th:first-child,td:first-child,td.left,th.left{text-align:left}
 thead th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-soft);font-weight:600;border-bottom:1px solid var(--line)}
 tbody tr:not(:last-child) td{border-bottom:1px solid var(--line)}
@@ -215,6 +218,7 @@ td.soft,span.soft{color:var(--ink-soft)}
 .pill.Returning{background:var(--good-soft);color:var(--good)}
 .pill.Transfer{background:var(--blue-soft);color:var(--blue)}
 .pill.nodata{background:var(--muted-soft);color:var(--ink-soft)}
+.sticky{position:sticky;left:0;background:var(--surface);z-index:1}
 .flag{font-size:11px;color:var(--warn);font-weight:600}
 .bar{height:8px;border-radius:999px;background:var(--line);overflow:hidden;min-width:80px}
 .bar>div{height:100%;background:var(--blue)}
@@ -360,39 +364,71 @@ def main():
             w(f"<div class='tile'><div class='label'>{label}</div><div class='value'>{v}</div><div class='sub'>{sub}</div></div>")
         w("</div></section>")
 
-    # --- roster table
-    w(f"<section><h2>{SEASON - 1}-{str(SEASON)[2:]} roster, with each player's {LAST_SEASON - 1}-{str(LAST_SEASON)[2:]} stats</h2>"
+    # --- roster tables
+    def name_cell(r, gp):
+        small = " <span class='flag'>small sample</span>" if 0 < gp < SMALL_GAMES else ""
+        return (f"<td class='name left sticky'>{esc(r['player'])} <span class='soft'>#{esc(r['jersey'])}</span>"
+                f"{small}</td>")
+
+    def split(t, made, att):
+        return (f"<td>{fmt(per_game(t, made))}-{fmt(per_game(t, att))}</td>"
+                f"<td>{fmt(pct(t.get(made, 0), t.get(att, 0)))}</td>")
+
+    season_label = f"{LAST_SEASON - 1}-{str(LAST_SEASON)[2:]}"
+    w(f"<section><h2>{SEASON - 1}-{str(SEASON)[2:]} roster: who they are</h2>"
       "<div class='panel scroll'><table><thead><tr>"
-      "<th>#</th><th class='left'>Player</th><th class='left'>Pos</th><th class='left'>Ht</th><th class='left'>Yr</th>"
+      "<th class='left sticky'>Player</th><th class='left'>Pos</th><th class='left'>Ht</th><th class='left'>Yr</th>"
       "<th class='left'>Status</th><th class='left'>Last season at</th>"
-      "<th>GP</th><th>MPG</th><th>PPG</th><th>RPG</th><th>APG</th><th>FG%</th><th>3PM-A/g</th><th>3P%</th><th>FT%</th>"
+      f"<th>GP</th><th>GS</th><th>MPG</th><th>PPG</th><th>RPG</th><th>ORB</th><th>APG</th>"
+      "<th>STL</th><th>BLK</th><th>TO</th><th>PF</th><th>A/TO</th>"
       "</tr></thead><tbody>")
     for r, t in players:
         gp = t.get("GP", 0)
         pill = "nodata" if r["status"] == "No data" else r["status"]
-        small = " <span class='flag'>small sample</span>" if 0 < gp < SMALL_GAMES else ""
-        where = r["last_season_team"] if r["status"] == "Transfer" else ("" if r["status"] == "Returning" else "")
-        if r["status"] == "No data" and r["previous_schools"]:
+        if r["status"] == "Transfer":
+            where = esc(r["last_season_team"])
+        elif r["status"] == "No data" and r["previous_schools"]:
             where = f"<span class='soft'>{esc(r['previous_schools'])}</span>"
         else:
-            where = esc(where)
+            where = ""
         if gp:
-            stats = (f"<td>{int(gp)}</td><td>{fmt(per_game(t, 'MIN'))}</td><td>{fmt(per_game(t, 'PTS'))}</td>"
-                     f"<td>{fmt(per_game(t, 'REB'))}</td><td>{fmt(per_game(t, 'AST'))}</td>"
-                     f"<td>{fmt(pct(t.get('FGM', 0), t.get('FGA', 0)))}</td>"
-                     f"<td>{fmt(per_game(t, '3PTM'))}-{fmt(per_game(t, '3PTA'))}</td>"
-                     f"<td>{fmt(pct(t.get('3PTM', 0), t.get('3PTA', 0)))}</td>"
-                     f"<td>{fmt(pct(t.get('FTM', 0), t.get('FTA', 0)))}</td>")
+            to = t.get("TO", 0)
+            ast_to = fmt(t.get("AST", 0) / to) if to else "–"
+            stats = (f"<td>{int(gp)}</td><td>{int(t.get('GS', 0))}</td><td>{fmt(per_game(t, 'MIN'))}</td>"
+                     f"<td>{fmt(per_game(t, 'PTS'))}</td><td>{fmt(per_game(t, 'REB'))}</td>"
+                     f"<td>{fmt(per_game(t, 'OREB'))}</td><td>{fmt(per_game(t, 'AST'))}</td>"
+                     f"<td>{fmt(per_game(t, 'STL'))}</td><td>{fmt(per_game(t, 'BLK'))}</td>"
+                     f"<td>{fmt(per_game(t, 'TO'))}</td><td>{fmt(per_game(t, 'PF'))}</td><td>{ast_to}</td>")
         else:
-            stats = "<td class='soft' colspan='9' style='text-align:left'>no Division I stats last season</td>"
-        w(f"<tr><td>{esc(r['jersey'])}</td><td class='name left'>{esc(r['player'])}{small}</td>"
+            stats = "<td class='soft left' colspan='12'>no Division I stats last season</td>"
+        w(f"<tr>{name_cell(r, gp)}"
           f"<td class='left'>{esc(r['position'])}</td><td class='left'>{esc(r['height'])}</td>"
           f"<td class='left'>{esc(r['class'])}</td><td class='left'><span class='pill {pill}'>{esc(r['status'])}</span></td>"
           f"<td class='left'>{where}</td>{stats}</tr>")
     w("</tbody></table></div>"
-      "<p class='note'>Sorted by minutes played last season. Transfers' stats are from their previous D1 school. "
-      "Players listed with no D1 stats are freshmen, redshirts, or came from junior college, Division II, NAIA or overseas, "
-      "which ESPN doesn't cover.</p></section>")
+      f"<p class='note'>Per-game averages from {season_label}, sorted by minutes played. Transfers' stats are from their "
+      "previous D1 school. Players with no D1 stats are freshmen, redshirts, or came from junior college, Division II, "
+      "NAIA or overseas, which ESPN doesn't cover.</p></section>")
+
+    w(f"<section><h2>Shooting splits, {season_label}</h2>"
+      "<div class='panel scroll'><table><thead><tr><th class='left sticky'>Player</th>"
+      "<th>FGM-A/g</th><th>FG%</th><th>2PM-A/g</th><th>2P%</th><th>3PM-A/g</th><th>3P%</th>"
+      "<th>FTM-A/g</th><th>FT%</th><th>eFG%</th><th>3PA share</th><th>FT rate</th>"
+      "</tr></thead><tbody>")
+    for r, t in players:
+        gp = t.get("GP", 0)
+        if not gp:
+            continue
+        two = {"2PM": t.get("FGM", 0) - t.get("3PTM", 0), "2PA": t.get("FGA", 0) - t.get("3PTA", 0), "GP": gp}
+        fga = t.get("FGA", 0)
+        efg = pct(t.get("FGM", 0) + 0.5 * t.get("3PTM", 0), fga)
+        w(f"<tr>{name_cell(r, gp)}{split(t, 'FGM', 'FGA')}{split(two, '2PM', '2PA')}"
+          f"{split(t, '3PTM', '3PTA')}{split(t, 'FTM', 'FTA')}<td>{fmt(efg)}</td>"
+          f"<td>{fmt(pct(t.get('3PTA', 0), fga), 0, '%')}</td><td>{fmt(pct(t.get('FTA', 0), fga), 0, '%')}</td></tr>")
+    w("</tbody></table></div>"
+      "<p class='note'><strong>eFG%</strong> counts a made three as 1.5 makes, so it compares shooters fairly. "
+      "<strong>3PA share</strong> is the share of a player's shots that are threes. "
+      "<strong>FT rate</strong> is free throw attempts per field goal attempt, a measure of how often he gets to the line.</p></section>")
 
     # --- roster profile vs last season's team vs UCR
     w("<section><h2>What this roster did last season, combined</h2><div class='panel scroll'><table><thead><tr>"
@@ -402,7 +438,7 @@ def main():
         ("Points", "pts", "ppg", 1, ""), ("Rebounds", "reb", "reb", 1, ""),
         ("Assists", "ast", "ast", 1, ""), ("Turnovers", "to", "to", 1, ""),
         ("FG %", "fg", "fg", 1, "%"), ("3PT %", "three", "three", 1, "%"),
-        ("FT %", "ft", "ft", 1, "%"), ("3PT attempts per FGA", "three_rate", None, 0, "%"),
+        ("2PT %", "two", "two", 1, "%"), ("FT %", "ft", "ft", 1, "%"), ("3PT attempts per FGA", "three_rate", None, 0, "%"),
         ("Free throw attempts per FGA", "ft_rate", None, 0, "%"),
         ("Offensive rebounds", "oreb", None, 1, ""), ("Steals", "stl", None, 1, ""), ("Blocks", "blk", None, 1, ""),
     ]

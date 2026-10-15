@@ -44,8 +44,17 @@ def clean_name(name):
     """'Samuel "Tobi" Ariyibi' -> 'samuel ariyibi', 'Marqui Worthy Jr.' -> 'marqui worthy'"""
     name = re.sub(r"\(.*?\)|\".*?\"", " ", name)  # drop (TT) and "Tobi" nicknames
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
-    name = re.sub(r"[^a-z ]", "", name.lower().replace("-", ""))
+    name = re.sub(r"[^a-z ]", "", name.lower().replace("-", " "))
     return " ".join(w for w in name.split() if w not in SUFFIXES)
+
+
+def name_key(name):
+    """Ignore spaces and hyphens: 'Wickstrom-Stumer' and 'Wickstrom Stumer' match."""
+    return clean_name(name).replace(" ", "")
+
+
+def clean_school(text):
+    return " ".join(re.sub(r"[^a-z ]", " ", text.lower()).split())
 
 
 def season_lines(db, athlete_id, season):
@@ -87,15 +96,36 @@ def main():
     # Every player ESPN knows about, by cleaned name
     by_name = defaultdict(list)
     for athlete_id, name in db.execute("SELECT athlete_id, name FROM players"):
-        by_name[clean_name(name)].append(athlete_id)
+        by_name[name_key(name)].append(athlete_id)
 
-    # Last season's players for each team, by last name (backup matching)
-    def team_last_season_players(tid):
-        rows = db.execute(
-            """SELECT DISTINCT p.athlete_id, p.name FROM player_stats ps
+    # Everyone who played last season, with the team they played for (backup matching)
+    played = defaultdict(set)  # last-name word -> {(athlete_id, first initial, team id, team name)}
+    for aid, name, tid_, tname in db.execute(
+            """SELECT DISTINCT p.athlete_id, p.name, ps.team_id, t.name FROM player_stats ps
                JOIN games g USING (game_id) JOIN players p USING (athlete_id)
-               WHERE ps.team_id = ? AND g.season = ?""", (tid, last_season)).fetchall()
-        return [(aid, clean_name(n)) for aid, n in rows]
+               JOIN teams t ON t.team_id = ps.team_id
+               WHERE g.season = ?""", (last_season,)):
+        words = clean_name(name).split()
+        for w in words[1:]:
+            if len(w) >= 3:
+                played[w].add((aid, words[0][:1], tid_, clean_school(tname)))
+
+    def backup_match(roster_name, own_tid, previous_schools):
+        """Same last name, plus either the same first initial or a team that fits
+        (his current team, or one of the previous schools on his roster page)."""
+        words = clean_name(roster_name).split()
+        if len(words) < 2:
+            return []
+        schools = [clean_school(s) for s in re.split(r"/", previous_schools) if s.strip()]
+        school_fit, initial_fit = set(), set()
+        for w in words[1:]:
+            for aid, initial, tid_, tname in played.get(w, ()):
+                if tid_ == own_tid or any(sc and sc in tname for sc in schools):
+                    school_fit.add(aid)
+                elif initial == words[0][:1]:
+                    initial_fit.add(aid)
+        # A team match is much stronger evidence than a first initial
+        return sorted(school_fit) if school_fit else sorted(initial_fit)
 
     with open(roster_file, encoding="utf-8") as f:
         roster = list(csv.DictReader(f))
@@ -112,22 +142,17 @@ def main():
         if not tid:
             print(f"{team:<36} (team name not found in {opp_file.name})")
             continue
-        last_year = team_last_season_players(tid)
         counts = defaultdict(int)
         returning_minutes = 0
 
         for p in players:
-            cleaned = clean_name(p["name"])
-            candidates = by_name.get(cleaned, [])
+            candidates = by_name.get(name_key(p["name"]), [])
             note = ""
-
-            # Backup: same last name + same first initial on this team last season
-            if not candidates and cleaned:
-                parts = cleaned.split()
-                candidates = [aid for aid, n in last_year
-                              if n.split()[-1] == parts[-1] and n[0] == parts[0][0]]
-                if candidates:
-                    note = "matched by last name"
+            if not any(season_lines(db, a, last_season) for a in candidates):
+                backup = backup_match(p["name"], tid, p["previous_schools"])
+                if backup:
+                    candidates = backup
+                    note = "matched by last name, check"
 
             best = None  # (athlete_id, lines)
             for aid in candidates:
