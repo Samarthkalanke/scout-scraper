@@ -214,14 +214,21 @@ def blended_rows(this_team, profile, last_team):
     return rows
 
 
+def season_list(season):
+    """Accept one season (2026) or several ([2026, 2027])."""
+    return list(season) if isinstance(season, (list, tuple)) else [season]
+
+
 def zone_table(db, athlete_ids, season, basket_y):
     ids = [a for a in athlete_ids if a]
+    seasons = season_list(season)
     counts = {z: [0, 0] for z in shot_zones.ZONES}
-    if ids:
+    if ids and seasons:
         marks = ",".join("?" * len(ids))
+        smarks = ",".join("?" * len(seasons))
         for x, y, three, made in db.execute(
                 f"""SELECT s.x, s.y, s.is_three, s.made FROM shots s JOIN games g USING (game_id)
-                    WHERE g.season = ? AND s.athlete_id IN ({marks})""", [season, *ids]):
+                    WHERE g.season IN ({smarks}) AND s.athlete_id IN ({marks})""", [*seasons, *ids]):
             z = shot_zones.zone_for({"x": x, "y": y, "three": bool(three)}, basket_y)
             counts[z][1] += 1
             counts[z][0] += made
@@ -279,13 +286,16 @@ def all_zones(db, season, basket_y):
 def assisted_share(db, athlete_ids, season):
     """Share of made field goals that were assisted (the play text names the passer)."""
     ids = [a for a in athlete_ids if a]
-    if not ids:
+    seasons = season_list(season)
+    if not ids or not seasons:
         return None
     marks = ",".join("?" * len(ids))
+    smarks = ",".join("?" * len(seasons))
     made, assisted = db.execute(
         f"""SELECT COUNT(*), SUM(CASE WHEN s.description LIKE '%assist%' THEN 1 ELSE 0 END)
             FROM shots s JOIN games g USING (game_id)
-            WHERE g.season = ? AND s.made = 1 AND s.athlete_id IN ({marks})""", [season, *ids]).fetchone()
+            WHERE g.season IN ({smarks}) AND s.made = 1 AND s.athlete_id IN ({marks})""",
+        [*seasons, *ids]).fetchone()
     return pct(assisted or 0, made)
 
 
@@ -392,19 +402,28 @@ def game_lines(db, team_id, season):
 
 
 def win_loss_trends(lines):
-    """Average of each stat in wins vs losses, ranked by how clearly it separates them."""
+    """Average of each stat in wins vs losses, ranked by how clearly it separates them.
+
+    Each game can carry a weight ("w", default 1), so last season's games can count
+    less than this season's. With every weight equal, this is a plain average.
+    """
     wins = [ln for ln in lines if ln["won"]]
     losses = [ln for ln in lines if not ln["won"]]
+
+    def wmean(pairs):
+        total_w = sum(wt for _, wt in pairs)
+        return sum(v * wt for v, wt in pairs) / total_w
+
     out = []
     for key, label, d, suf, better in TREND_STATS:
-        w_vals = [ln[key] for ln in wins if ln.get(key) is not None]
-        l_vals = [ln[key] for ln in losses if ln.get(key) is not None]
+        w_vals = [(ln[key], ln.get("w", 1)) for ln in wins if ln.get(key) is not None]
+        l_vals = [(ln[key], ln.get("w", 1)) for ln in losses if ln.get(key) is not None]
         all_vals = w_vals + l_vals
         if len(w_vals) < 2 or len(l_vals) < 2:
             continue
-        mw, ml = sum(w_vals) / len(w_vals), sum(l_vals) / len(l_vals)
-        mean = sum(all_vals) / len(all_vals)
-        sd = (sum((v - mean) ** 2 for v in all_vals) / (len(all_vals) - 1)) ** 0.5
+        mw, ml = wmean(w_vals), wmean(l_vals)
+        mean = wmean(all_vals)
+        sd = wmean([((v - mean) ** 2, wt) for v, wt in all_vals]) ** 0.5
         effect = (mw - ml) / sd if sd else 0
         out.append({"key": key, "label": label, "d": d, "suf": suf, "better": better,
                     "win": mw, "loss": ml, "effect": effect,
@@ -627,37 +646,40 @@ def main():
     roster_assisted = assisted_share(db, roster_ids, LAST_SEASON)
     roster_mix = scoring_mix(combine(with_data))
 
-    # Top 3: points per game. Uses this season once a player has 5+ games, otherwise last season.
+    # Top 3: ranked by blended points per game (this season mixed with last, see blend.player).
+    # A player needs 5+ games last season or 3+ this season to be considered.
     cur_totals = player_season_totals(db, roster_ids, SEASON)
-
-    def scoring_rank(rt):
-        r, t = rt
+    candidates = []
+    for r, t in players:
         cur = cur_totals.get(r["espn_athlete_id"], {})
-        if cur.get("GP", 0) >= 5:
-            return per_game(cur, "PTS")
-        return per_game(t, "PTS") if t.get("GP", 0) >= 5 else -1
+        last_gp, cur_gp = t.get("GP", 0), cur.get("GP", 0)
+        if last_gp < 5 and cur_gp < 3:
+            continue
+        blended, weight = blend.player(t, cur)
+        candidates.append((per_game(blended, "PTS") or 0, r, blended, last_gp, cur_gp, weight))
+    candidates.sort(key=lambda c: -c[0])
 
     top_cards = []
-    for r, t in sorted(players, key=scoring_rank, reverse=True)[:3]:
-        if scoring_rank((r, t)) < 0:
-            continue
+    for _, r, blended, last_gp, cur_gp, weight in candidates[:3]:
         aid = r["espn_athlete_id"]
-        cur = cur_totals.get(aid, {})
-        season_used = SEASON if cur.get("GP", 0) >= 5 else LAST_SEASON
-        src = cur if season_used == SEASON else t
-        zc = coarse(zone_table(db, [aid], season_used, basket_y)[0])
-        top_cards.append({"r": r, "t": src, "season": season_used, "zones": zc,
-                          "assisted": assisted_share(db, [aid], season_used),
-                          "mix": scoring_mix(src), "tags": player_tags(src, zc)})
+        seasons = [s for s, gp in ((LAST_SEASON, last_gp), (SEASON, cur_gp)) if gp]
+        zc = coarse(zone_table(db, [aid], seasons, basket_y)[0])
+        top_cards.append({"r": r, "t": blended, "last_gp": last_gp, "cur_gp": cur_gp,
+                          "weight": weight, "zones": zc,
+                          "assisted": assisted_share(db, [aid], seasons),
+                          "mix": scoring_mix(blended), "tags": player_tags(blended, zc)})
 
-    # Win/loss trends: this season once there are 3+ wins and 3+ losses, otherwise last season
+    # Win/loss trends: last season's games together count as blend.K_TRENDS games,
+    # each of this season's games counts as 1, so this season takes over gradually.
+    last_lines = game_lines(db, team_id, LAST_SEASON)
     cur_lines = game_lines(db, team_id, SEASON)
-    cur_w = sum(1 for ln in cur_lines if ln["won"])
-    if cur_w >= 3 and len(cur_lines) - cur_w >= 3:
-        trend_season, trend_lines = SEASON, cur_lines
-    else:
-        trend_season, trend_lines = LAST_SEASON, game_lines(db, team_id, LAST_SEASON)
-    trends, n_wins, n_losses = win_loss_trends(trend_lines)
+    for ln in last_lines:
+        ln["w"] = blend.K_TRENDS / len(last_lines)
+    trend_weight = (blend.this_season_weight(len(cur_lines), blend.K_TRENDS)
+                    if last_lines else 1.0)
+    record = lambda lines: (sum(ln["won"] for ln in lines), sum(not ln["won"] for ln in lines))
+    last_record, cur_record = record(last_lines), record(cur_lines)
+    trends, n_wins, n_losses = win_loss_trends(last_lines + cur_lines)
 
     former_ucr = [r for r, _ in players if r["last_season_team_id"] == UCR_ID and r["status"] == "Transfer"]
     db.close()
@@ -745,7 +767,7 @@ def main():
     w("<section><h2>Top 3 players</h2><div class='cards'>")
     for c in top_cards:
         r, t = c["r"], c["t"]
-        where = r["last_season_team"] if c["season"] == LAST_SEASON and r["status"] == "Transfer" else team_name
+        where = r["last_season_team"] if r["status"] == "Transfer" else team_name
         origin = (f"{esc(r['status'])}, from {esc(r['last_season_team'])}" if r["status"] == "Transfer"
                   else esc(r["status"]))
         two_m, two_a = t.get("FGM", 0) - t.get("3PTM", 0), t.get("FGA", 0) - t.get("3PTA", 0)
@@ -779,14 +801,24 @@ def main():
             w("</tbody></table>")
         if c["tags"]:
             w("<div>" + " ".join(f"<span class='tag'>{esc(tg)}</span>" for tg in c["tags"]) + "</div>")
-        w(f"<div class='soft small'>{label_for(c['season'])} at {esc(where)}, {int(gp)} games"
-          + (" · <span class='flag'>small sample</span>" if gp < SMALL_GAMES else "") + "</div>")
+        basis = []
+        if c["last_gp"]:
+            basis.append(f"{label_for(LAST_SEASON)} at {esc(where)}: {int(c['last_gp'])} games")
+        if c["cur_gp"]:
+            basis.append(f"{label_for(SEASON)}: {int(c['cur_gp'])} games")
+        if c["last_gp"] and c["cur_gp"]:
+            basis.append(f"this season is {100 * c['weight']:.0f}% of his scoring number")
+        real_games = c["last_gp"] + c["cur_gp"]
+        w(f"<div class='soft small'>{' · '.join(basis)}"
+          + (" · <span class='flag'>small sample</span>" if real_games < SMALL_GAMES else "") + "</div>")
         w("</div>")
     if not top_cards:
-        w("<p class='note'>No player on this roster has 5+ Division I games yet.</p>")
-    w("</div><p class='note'>Ranked by points per game. Uses this season's numbers once a player has 5 games, "
-      "otherwise last season's, wherever he played. Shot shares are of his field goal attempts. Labels are fixed "
-      "rules, such as 4+ threes a game at 35% or better for a volume shooter.</p></section>")
+        w("<p class='note'>No player on this roster has 5+ Division I games last season or 3+ this season yet.</p>")
+    w("</div><p class='note'>Ranked by points per game. Once games are played, each player's numbers mix this "
+      "season with last season (wherever he played), the same way as the team table above, so one big night "
+      "doesn't jump a player into the top 3. Freshmen and others without D1 stats appear once they have 3 games. "
+      "Shot shares are of his field goal attempts across both seasons. Labels are fixed rules, such as 4+ threes "
+      "a game at 35% or better for a volume shooter.</p></section>")
 
     # --- how they score
     w(f"<section><h2>How they score</h2><div class='tiles'>")
@@ -837,12 +869,20 @@ def main():
       f"({d1_total:,} shots). Zones are approximate because shot locations are charted by hand.</p></section>")
 
     # --- win/loss trends
-    w(f"<section><h2>What decides their games: wins vs losses, {label_for(trend_season)} "
-      f"({n_wins}-{n_losses})</h2>")
-    if trend_season == LAST_SEASON and trust in ("low", "medium"):
-        w(f"<div class='callout'>These trends are from last season's team, which returns only "
+    games_used = []
+    if last_lines:
+        games_used.append(f"{label_for(LAST_SEASON)} ({last_record[0]}-{last_record[1]})")
+    if cur_lines:
+        games_used.append(f"{label_for(SEASON)} ({cur_record[0]}-{cur_record[1]})")
+    w("<section><h2>What decides their games: wins vs losses, " + " + ".join(games_used) + "</h2>")
+    if last_lines and cur_lines:
+        w(f"<p class='note'>Last season's games together count like {blend.K_TRENDS} games and each game this "
+          f"season counts as one, so this season makes up <strong>{100 * trend_weight:.0f}%</strong> of these "
+          "numbers and takes over as games are played.</p>")
+    if trend_weight < 0.5 and trust in ("low", "medium"):
+        w(f"<div class='callout'>These trends lean mostly on last season's team, which returns only "
           f"{fmt(continuity, 0, '%')} of its minutes. They say more about how this coach's teams win than about "
-          f"these players. They switch to this season automatically once {short} has 3 wins and 3 losses.</div>")
+          f"these players. This season's games take over as {short} plays more of them.</div>")
     if trends:
         w("<div class='panel pad'><ul class='bullets'>")
         for tr in [t for t in trends if not t["context"]][:3]:

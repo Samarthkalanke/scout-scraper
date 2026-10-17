@@ -67,6 +67,86 @@ def this_season_weight(amount, k):
     return amount / (amount + k) if amount + k else 1.0
 
 
+# ---------------------------------------------------------------- win/loss trends
+
+# Last season's games, all together, count like this many games of this season.
+# Each of last season's games gets weight K_TRENDS / (games last season); each of
+# this season's games gets weight 1. Close to the team k values for points (8)
+# and turnovers forced (10). Not tested separately.
+K_TRENDS = 10
+
+
+# ---------------------------------------------------------------- players
+
+# k in GAMES for one player's per-game stats. The replay test tuned team stats,
+# not players, so these borrow the team values. Two rules keep them sensible:
+#   - shooting k is in games too, turned into attempts with the player's own
+#     attempts per game last season (a 3-a-game shooter and a 7-a-game shooter
+#     both get about 13 games of history), matching the team values
+#     (300 3PA / ~23 a game = 13 games; 150 FTA / ~20 a game = 8 games)
+#   - k never exceeds the games he actually played last season, so 4 games of
+#     history can't outweigh 10 games this season
+PLAYER_K = {
+    "MIN": 5,     # role can change fast on a new team
+    "PTS": 8,
+    "AST": 5,
+    "REB": 15,
+    "OREB": 15,
+    "STL": 10,
+    "BLK": 10,
+    "TO": 15,
+    "PF": 10,
+    "2PA": 5,     # attempts per game: style, shows up fast
+    "3PTA": 3,
+    "FTA": 6,
+}
+PLAYER_SHOOTING_K_GAMES = {   # made / attempted key, k in games
+    ("2PM", "2PA"): 13,
+    ("3PTM", "3PTA"): 13,
+    ("FTM", "FTA"): 8,
+}
+
+
+def _with_twos(t):
+    t = dict(t)
+    t["2PM"] = t.get("FGM", 0) - t.get("3PTM", 0)
+    t["2PA"] = t.get("FGA", 0) - t.get("3PTA", 0)
+    return t
+
+
+def player(last, cur):
+    """Blend one player's season totals. Returns (totals, this season's weight on scoring).
+
+    The returned totals look like a normal season line, so the report can use them
+    as-is: GP is all his games in both seasons, and every other number is the
+    blended per-game value times GP. Percentages come out blended too.
+    """
+    last_gp, cur_gp = last.get("GP", 0), cur.get("GP", 0)
+    if not cur_gp:
+        return dict(last), 0.0
+    if not last_gp:
+        return dict(cur), 1.0
+    last, cur = _with_twos(last), _with_twos(cur)
+    games = last_gp + cur_gp
+    out = {"GP": games}
+    last_avg = lambda key: last.get(key, 0) / last_gp
+
+    for key, k in PLAYER_K.items():
+        avg = per_game(cur.get(key, 0), cur_gp, last_avg(key), min(k, last_gp))
+        out[key] = avg * games
+
+    for (made_key, att_key), k_games in PLAYER_SHOOTING_K_GAMES.items():
+        k_att = min(k_games, last_gp) * last_avg(att_key)
+        last_att = last.get(att_key, 0)
+        last_pct = 100 * last.get(made_key, 0) / last_att if last_att else None
+        p = percentage(cur.get(made_key, 0), cur.get(att_key, 0), last_pct, k_att)
+        out[made_key] = (p or 0) / 100 * out[att_key]
+
+    out["FGA"] = out["2PA"] + out["3PTA"]
+    out["FGM"] = out["2PM"] + out["3PTM"]
+    return out, this_season_weight(cur_gp, min(PLAYER_K["PTS"], last_gp))
+
+
 if __name__ == "__main__":
     print("Worked example: a team 3 games into the season.\n")
     pts = per_game(246, 3, 72.0, K_GAMES["pts"])
