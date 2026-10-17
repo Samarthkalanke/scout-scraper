@@ -15,6 +15,7 @@ What it runs, in order:
     3. build_db.py          rebuild the database from all downloaded games
     4. label_rosters.py     re-match rosters to stats (picks up new games for every player)
     5. make_report.py       one report (web page + PDF) per opponent
+    6. build_site.py        rebuild the website folder (site/) from every report
 
 A couple of days before each game, run:  python update.py
 """
@@ -118,10 +119,14 @@ def main():
         run(f"Report: {opponents.get(target, {}).get('name', target)}", "make_report.py", target)
         made.append(target)
 
+    # 6. Website: rebuild the site folder from every finished report
+    run("Building the website", "build_site.py")
+
     print("\n=== Done ===")
     if made:
         print("Reports are in the reports folder. Open one with, for example:")
         print("    start reports\\denver-pioneers.pdf")
+    print("Website preview:  start site\\index.html")
 
 
 if __name__ == "__main__":
