@@ -5,6 +5,11 @@ Usage:
     python make_report.py denver
     python make_report.py "san jose"
     python make_report.py 2172           (ESPN team ID also works)
+    python make_report.py denver --preview 4
+        Test switch: pretends Denver's first 4 games of last season were played this
+        season, so you can see the blending before real games exist. Uses a copy of
+        the database in memory (scout.db is never changed) and writes
+        reports/<team>-preview.html and .pdf with a "PREVIEW" banner.
 
 Writes reports/<team>.html and reports/<team>.pdf (the PDF is printed with
 Microsoft Edge or Chrome in the background, landscape, ready to send):
@@ -585,15 +590,41 @@ def save_pdf(html_file):
     return None, "the browser did not create the PDF"
 
 
+def start_preview(db, team_id, n):
+    """Test switch: pretend the team's first n games of last season are this season.
+
+    Works on a copy of the database held in memory, so data/scout.db is never changed.
+    Those n games move from LAST_SEASON to SEASON, so the report shows blending exactly
+    as it will once real games are played. Returns the in-memory copy.
+    """
+    copy = sqlite3.connect(":memory:")
+    db.backup(copy)
+    db.close()
+    ids = [gid for (gid,) in copy.execute(
+        """SELECT game_id FROM games WHERE season = ? AND (home_id = ? OR away_id = ?)
+           ORDER BY date, game_id LIMIT ?""", (LAST_SEASON, team_id, team_id, n))]
+    copy.executemany("UPDATE games SET season = ? WHERE game_id = ?", [(SEASON, g) for g in ids])
+    return copy, len(ids)
+
+
 def main():
-    if len(sys.argv) < 2:
-        sys.exit('Usage: python make_report.py denver   (or a team ID)')
+    args = sys.argv[1:]
+    preview = None
+    if "--preview" in args:
+        i = args.index("--preview")
+        try:
+            preview = int(args[i + 1])
+        except (IndexError, ValueError):
+            sys.exit("Use --preview with a number of games, like: python make_report.py denver --preview 4")
+        del args[i:i + 2]
+    if not args:
+        sys.exit('Usage: python make_report.py denver   (or a team ID)   [--preview N]')
     for needed in (DB_FILE, ROSTER_FILE, OPP_FILE):
         if not needed.exists():
             sys.exit(f"Missing {needed}.")
 
     opponents = json.loads(OPP_FILE.read_text(encoding="utf-8"))
-    team_id, team_name = find_team(" ".join(sys.argv[1:]), opponents)
+    team_id, team_name = find_team(" ".join(args), opponents)
     game_dates = sorted(opponents[team_id]["dates"])
 
     with open(ROSTER_FILE, encoding="utf-8") as f:
@@ -602,6 +633,8 @@ def main():
     ucr_roster = [r for r in all_rows if r["team_id"] == UCR_ID]
 
     db = sqlite3.connect(DB_FILE)
+    if preview is not None:
+        db, preview = start_preview(db, team_id, preview)
     basket_y = calibrate_basket(db)
 
     # --- players
@@ -717,6 +750,11 @@ def main():
         return f"{season - 1}-{str(season)[2:]}"
 
     short = esc(team_name.split()[0])
+
+    if preview is not None:
+        w(f"<div class='callout'><strong>PREVIEW, NOT A REAL REPORT.</strong> To test the blending, {short}'s "
+          f"first {preview} games of {label_for(LAST_SEASON)} are shown as if they were {label_for(SEASON)} "
+          f"games. Don't send this one.</div>")
 
     # --- at a glance
     w("<section><h2>At a glance</h2><div class='tiles'>")
@@ -1039,7 +1077,8 @@ def main():
     w("</main></body></html>")
 
     OUT_DIR.mkdir(exist_ok=True)
-    out_file = OUT_DIR / f"{slug(team_name)}.html"
+    out_file = OUT_DIR / (f"{slug(team_name)}-preview.html" if preview is not None
+                          else f"{slug(team_name)}.html")
     out_file.write_text("".join(out), encoding="utf-8")
     print(f"Report written to {out_file}")
     pdf_file, problem = save_pdf(out_file)
