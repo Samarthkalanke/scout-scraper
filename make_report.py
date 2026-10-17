@@ -14,6 +14,7 @@ Needs (all made by earlier scripts):
     data/scout.db               build_db.py
     data/rosters_2027.csv       label_rosters.py
     data/opponents_27_2027.json fetch_opponents.py
+    blend.py                    k values for mixing this season with last season
 
 Every number is calculated fresh from the database each time this runs, so after
 new games are downloaded and build_db.py is rerun, the report updates itself.
@@ -33,6 +34,7 @@ import unicodedata
 from datetime import date
 from pathlib import Path
 
+import blend
 import shot_zones
 
 UCR_ID = "27"
@@ -122,6 +124,18 @@ def team_season(db, team_id, season):
         "reb": g(us, "totalRebounds") / n, "opp_reb": g(them, "totalRebounds") / n,
         "to": g(us, "turnovers") / n, "opp_to": g(them, "turnovers") / n,
         "ast": g(us, "assists") / n,
+        # Raw counts, used for blending: percentages blend by attempts, per-game stats by totals
+        "made_att": {
+            "fg": (g(us, "fieldGoalsMade"), g(us, "fieldGoalsAttempted")),
+            "three": (g(us, "threePointFieldGoalsMade"), g(us, "threePointFieldGoalsAttempted")),
+            "opp_fg": (g(them, "fieldGoalsMade"), g(them, "fieldGoalsAttempted")),
+            "opp_three": (g(them, "threePointFieldGoalsMade"), g(them, "threePointFieldGoalsAttempted")),
+        },
+        "totals": {
+            "pts": pts, "opp_pts": opp,
+            "reb": g(us, "totalRebounds"), "opp_reb": g(them, "totalRebounds"),
+            "to": g(us, "turnovers"), "opp_to": g(them, "turnovers"),
+        },
     }
 
 
@@ -144,6 +158,60 @@ def roster_profile(totals):
         "three_rate": pct(totals.get("3PTA", 0), fga),
         "ft_rate": pct(totals.get("FTA", 0), fga),
     }
+
+
+# ---------------------------------------------------------------- blending this season with last
+
+# key, label, "game" or "pct", where last season's number comes from
+#   "roster" = what the CURRENT players did last season (offense: it follows the players)
+#   "team"   = last season's actual team (defense: it follows the coach and system)
+# Rebounds use the team because team box scores count "team rebounds" that player
+# stats don't, so the roster's number would read 2-3 low.
+SEASON_ROWS = [
+    ("pts", "Points scored", "game", "roster"),
+    ("opp_pts", "Points allowed", "game", "team"),
+    ("fg", "FG %", "pct", "roster"),
+    ("opp_fg", "Opponent FG %", "pct", "team"),
+    ("three", "3PT %", "pct", "roster"),
+    ("opp_three", "Opponent 3PT %", "pct", "team"),
+    ("reb", "Rebounds", "game", "team"),
+    ("opp_reb", "Opponent rebounds", "game", "team"),
+    ("to", "Turnovers", "game", "roster"),
+    ("opp_to", "Turnovers forced", "game", "team"),
+]
+TEAM_KEY = {"pts": "ppg", "opp_pts": "opp_ppg"}  # last_team names that differ
+
+
+def blended_rows(this_team, profile, last_team):
+    """One row per stat: the blended estimate, this season's raw number, and last season's."""
+    n = this_team["games"]
+    rows = []
+    for key, label, kind, source in SEASON_ROWS:
+        last, basis = None, "none"
+        team_key = TEAM_KEY.get(key, key)
+        if source == "roster" and profile and profile.get(key) is not None:
+            last, basis = profile[key], "current roster"
+        elif last_team and last_team.get(team_key) is not None:
+            last, basis = last_team[team_key], "last season's team"
+
+        if kind == "game":
+            k = blend.K_GAMES[key]
+            total = this_team["totals"][key]
+            raw = total / n
+            estimate = blend.per_game(total, n, last, k)
+            weight = blend.this_season_weight(n, k)
+        else:
+            k = blend.K_ATTEMPTS[key]
+            made, att = this_team["made_att"][key]
+            raw = pct(made, att)
+            estimate = blend.percentage(made, att, last, k)
+            weight = blend.this_season_weight(att, k)
+        if last is None:
+            weight = 1.0
+        rows.append({"label": label, "suffix": "%" if kind == "pct" else "",
+                     "estimate": estimate, "raw": raw, "last": last,
+                     "weight": weight, "basis": basis})
+    return rows
 
 
 def zone_table(db, athlete_ids, season, basket_y):
@@ -651,17 +719,27 @@ def main():
         w(f"<div class='callout'><strong>Former Highlanders:</strong> {esc(names)} played for UCR last season.</div>")
     w("</section>")
 
-    # --- this season, once games exist
+    # --- this season so far, blended with last season
     if this_team:
         n = this_team["games"]
         flag = " <span class='flag'>small sample</span>" if n < 5 else ""
-        w(f"<section><h2>This season so far ({this_team['wins']}-{this_team['losses']}, {n} games){flag}</h2><div class='tiles'>")
-        tile("Points / game", fmt(this_team["ppg"]), f"allowed {fmt(this_team['opp_ppg'])}")
-        tile("FG %", fmt(this_team["fg"], 1, "%"), f"opp. {fmt(this_team['opp_fg'], 1, '%')}")
-        tile("3PT %", fmt(this_team["three"], 1, "%"), f"opp. {fmt(this_team['opp_three'], 1, '%')}")
-        tile("Rebounds / game", fmt(this_team["reb"]), f"opp. {fmt(this_team['opp_reb'])}")
-        tile("Turnovers / game", fmt(this_team["to"]), f"forced {fmt(this_team['opp_to'])}")
-        w("</div></section>")
+        w(f"<section><h2>This season so far ({this_team['wins']}-{this_team['losses']}, {n} games){flag}</h2>"
+          "<div class='panel scroll'><table><thead><tr><th class='left'>Per game</th><th>Best estimate</th>"
+          f"<th>{label_for(SEASON)} so far</th><th>Last season</th><th>Weight on this season</th><th></th>"
+          "<th class='left'>Last season from</th></tr></thead><tbody>")
+        for row in blended_rows(this_team, profile, last_team):
+            s = row["suffix"]
+            w(f"<tr><td class='name'>{row['label']}</td><td class='name'>{fmt(row['estimate'], 1, s)}</td>"
+              f"<td>{fmt(row['raw'], 1, s)}</td><td class='soft'>{fmt(row['last'], 1, s)}</td>"
+              f"<td>{100 * row['weight']:.0f}%</td>"
+              f"<td><div class='bar'><div style='width:{100 * row['weight']:.0f}%'></div></div></td>"
+              f"<td class='left soft'>{esc(row['basis'])}</td></tr>")
+        w("</tbody></table></div>"
+          "<p class='note'><strong>Best estimate</strong> mixes this season with last season, because a few games "
+          "can mislead. Last season counts like several games' worth (more for noisy stats like rebounding and "
+          "opponent FG%, fewer for style stats), so this season takes over as games pile up. The weight column "
+          "shows how much of each estimate is this season. Offense uses what the current players did last season; "
+          "defense and rebounding use last season's team, since those carry over with the coach.</p></section>")
 
     # --- top 3
     w("<section><h2>Top 3 players</h2><div class='cards'>")
